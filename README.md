@@ -1,6 +1,6 @@
 # ECE 276A Projects
 
-I am a student of Professor Shumon Koga at Kobe University and a member of the
+Hello! I am a student of Professor Shumon Koga at Kobe University and a member of the
 [CINAPS Lab](https://cinapslab.com/). This repository contains my own reports
 and code for projects from
 [ECE 276A](https://natanaso.github.io/ece276a/index.html).
