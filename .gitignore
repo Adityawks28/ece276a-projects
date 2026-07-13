@@ -1,0 +1,49 @@
+# Course-provided material: NOT redistributed (copyright / academic integrity)
+# assignment handouts, HWs, robot config, slides
+*.pdf
+Lecture_Slides/
+IEEE Conference Template/
+password.txt
+
+# Provided datasets (assignment says do not include them)
+**/data/
+*.npz
+*.zip
+*.npy
+dataRGBD*
+
+# Provided starter utilities (course-supplied, not our work)
+**/pr2_utils.py
+**/load_data.py
+**/test_gtsam.py
+**/icp_warm_up/utils.py
+**/icp_warm_up/test_icp.py
+
+# Other projects' starter code (add our solutions here as we build them)
+ECE276A_PR1/
+ECE276A_PR3/
+
+# Generated / local
+# guide is rendered from the .md source; add final result figures with `git add -f`
+__pycache__/
+*.pyc
+*.html
+*.png
+.DS_Store
+
+# Public Project 1 files
+!ECE276A_PR1/
+ECE276A_PR1/*
+!ECE276A_PR1/code/
+ECE276A_PR1/code/*
+!ECE276A_PR1/code/data.py
+!ECE276A_PR1/code/main.py
+!ECE276A_PR1/code/panorama.py
+!ECE276A_PR1/code/quaternion.py
+!ECE276A_PR1/code/report_figs.py
+!ECE276A_PR1/code/small_figs.py
+!ECE276A_PR1/code/tracker.py
+!ECE276A_PR1/figures/
+!ECE276A_PR1/figures/*.png
+!ECE276A_PR1/ieeeconf.cls
+!ECE276A_PR1/main_revised.tex

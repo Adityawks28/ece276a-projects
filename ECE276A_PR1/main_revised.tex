@@ -1,0 +1,605 @@
+\documentclass[letterpaper, 10pt, conference]{ieeeconf}
+\IEEEoverridecommandlockouts
+\overrideIEEEmargins
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+\usepackage{placeins}
+
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\emergencystretch=2em
+
+% shorthands
+\newcommand{\q}{\mathbf{q}}
+\newcommand{\w}{\boldsymbol{\omega}}
+\newcommand{\ez}{\mathbf{e}_z}
+\newcommand{\Hstar}{\mathbb{H}_*}
+\newcommand{\dg}{^\circ}
+\DeclareMathOperator{\sinc}{sinc}
+
+\newcommand{\figorbox}[2][\linewidth]{%
+  \includegraphics[width=#1]{#2}%
+}
+
+\begin{document}
+
+\title{ECE 276A Project 1: Orientation Tracking}
+
+\author{\authorblockN{Aditya Wirayutha Kaya Simto}
+\authorblockA{Department of Computer Science and Systems Engineering \\ Kobe University}}
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+\section{Introduction}
+
+This project estimates the orientation of an IMU over time. The gyroscope gives
+angular velocity, which can be integrated into orientation, but sensor bias
+causes drift. The accelerometer gives the gravity direction when linear motion
+is small. Gravity can correct roll and pitch, but it cannot correct yaw. The
+main problem is therefore to combine both sensors without losing the useful
+information from either one.
+
+The data contains eleven sequences. Nine include VICON ground truth and two are
+test sequences. Following the handout~\cite{atanasov}, I calibrate the raw IMU
+data, integrate the gyroscope to obtain an initial quaternion trajectory, and
+refine it with projected gradient descent. I then use the estimated orientations
+to project the camera images into an equirectangular panorama.
+
+\section{Problem Formulation}
+
+At time $t$, $\q_t\in\Hstar$ describes the body orientation relative to the
+world. My quaternion functions store $\q=(q_w,\mathbf{q}_v)$ as
+$[q_w,q_x,q_y,q_z]$. Before passing a quaternion to SciPy in
+\texttt{main.py}, I reorder it as $[q_x,q_y,q_z,q_w]$ because SciPy uses the
+scalar last order by default~\cite{scipyquat}. The IMU gives angular velocity
+$\w_t$ and acceleration $\mathbf a_t$ in the body frame. Since the sampling
+interval changes slightly, I use the measured interval $\tau_t$ at every step.
+
+\emph{Motion model.} I assume $\w_t$ is constant during one interval:
+\begin{equation}
+\q_{t+1}=f(\q_t,\tau_t\w_t):=\q_t\circ\exp\!\left(\left[0,\tfrac{\tau_t\w_t}{2}\right]\right),
+\label{eq:motion}
+\end{equation}
+where $\circ$ is quaternion multiplication. The increment is on the right
+because $\w_t$ is measured in the body frame.
+
+\emph{Observation model.} When linear acceleration is small, the accelerometer
+measures gravity in the body frame:
+\begin{equation}
+[0,\mathbf{a}_t]=h(\q_t):=\q_t^{-1}\circ[0,0,0,g]\circ\q_t,
+\label{eq:obs}
+\end{equation}
+where $g=1$ in gravity units. The same model is
+$h(\q)=R(\q)^\top\ez$, with $\ez=[0,0,1]^\top$.
+
+\emph{Cost.} I estimate the trajectory by minimizing both model errors:
+\begin{equation}
+\begin{aligned}
+\mathbf r_t^m&=2\log\!\left(
+\q_{t+1}^{-1}\circ f(\q_t,\tau_t\w_t)\right),\\
+\mathbf r_t^a&=[0,\mathbf a_t]-h(\q_t),\\
+c(\q_{1:T})&=\tfrac12\sum_{t=0}^{T-1}\|\mathbf r_t^m\|_2^2
++\tfrac12\sum_{t=0}^{T}\|\mathbf r_t^a\|_2^2.
+\end{aligned}
+\label{eq:cost}
+\end{equation}
+The first term follows the gyroscope motion. The second term follows gravity.
+The code includes $t=0$ in the gravity term. Since $\q_0$ is fixed, this adds
+the same initial error to every candidate trajectory.
+
+\emph{Constraint.} Each quaternion must have unit norm:
+\begin{equation}
+\min_{\q_{1:T}}c(\q_{1:T})\quad\text{s.t.}\quad\|\q_t\|_2=1\ \forall t.
+\label{eq:constrained}
+\end{equation}
+The constraint set is the unit sphere $S^3\subset\mathbb{R}^4$. Its Euclidean
+projection is
+\begin{equation}
+\Pi_{\Hstar}(\q)=\q/\|\q\|_2.
+\label{eq:proj}
+\end{equation}
+This projection is only quaternion normalization. I fix the initial orientation
+as $\q_0=[1,0,0,0]$. Quaternions are convenient here because rotation matrices
+need more constraints and Euler angles become singular at pitch $\pm90\dg$.
+
+\section{Technical Approach}
+
+\subsection{Orientation Tracking}
+
+\subsubsection{Data Preprocessing}
+
+The IMU file is a $7\times N$ array containing time, acceleration, and
+gyroscope data. In \texttt{find\_static\_end}, I call the NumPy
+\texttt{sliding\_window\_view} function~\cite{numpywindow} with 50 samples to
+find when the sensor starts moving:
+\begin{equation}
+n_s=\min\left\{k:
+\max_{d\in\{x,y,z\}}\operatorname{std}(G_{k:k+49,d})>1.5\right\}.
+\label{eq:static}
+\end{equation}
+The starting time is different in each dataset, so one fixed value would not
+work well. Calling moving data stationary would make the calibration confidently
+wrong, which is not the confidence I need here.
+
+Here $S_a$ and $S_g$ are the sensor sensitivities, and
+$V_{\mathrm{ref}}$ is the reference voltage. I compute the scales and biases as
+\begin{equation}
+\begin{aligned}
+s_a&=\frac{V_{\mathrm{ref}}}{1023S_a}, &
+s_g&=\frac{V_{\mathrm{ref}}}{1023S_g}\frac{\pi}{180},\\
+\mathbf b_g&=\overline{\mathbf G}_{1:n_s}, &
+\mathbf b_a&=\overline{\mathbf A}_{1:n_s}
+ -\begin{bmatrix}0&0&1/s_a\end{bmatrix}^{\top}.
+\end{aligned}
+\label{eq:calibration}
+\end{equation}
+I then calibrate each measurement using
+\begin{equation}
+\mathbf a_t=s_a(\mathbf A_t-\mathbf b_a),\qquad
+\w_t=s_g(\mathbf G_t-\mathbf b_g).
+\label{eq:calibrated}
+\end{equation}
+This converts raw counts into g and rad/s. I estimate a separate bias for each
+dataset.
+
+The VICON and IMU timestamps do not match exactly. I use spherical linear
+interpolation to place the VICON rotations at the IMU times, and I remove
+invalid rotations. I check the calibration with
+\begin{equation}
+\frac{1}{|\mathcal I|}\sum_{t\in\mathcal I}
+\left\|\mathbf a_t-R_{\mathrm{vicon}}(t)^\top\ez\right\|_2<0.1\ \text{g}.
+\label{eq:gate}
+\end{equation}
+The residual is below the limit for every training dataset. The $+\ez$ sign
+also gives much less error than $-\ez$, so I use $+\ez$. Thankfully, this sign
+choice was not a close election.
+
+\subsubsection{Optimization}
+
+I first integrate the gyroscope. One rotation step and the resulting dead
+reckoning trajectory are
+\begin{equation}
+\begin{aligned}
+E_t&=\exp\!\left(\left[0,\frac{\tau_t\w_t}{2}\right]\right),\\
+\q_0^{\mathrm{dr}}&=[1,0,0,0],\\
+\q_{t+1}^{\mathrm{dr}}&=\q_t^{\mathrm{dr}}\circ E_t.
+\end{aligned}
+\label{eq:deadreckon}
+\end{equation}
+For a unit quaternion, $\|2\log\q\|=2\arccos(q_w)$. I define
+$\mathbf f_t=\q_t\circ E_t$ and
+$s_t=\langle\q_{t+1},\mathbf f_t\rangle$. This gives the simpler cost
+\begin{equation}
+c(\q)=2\sum_t\arccos^2(s_t)
++\frac12\sum_t\|\mathbf a_t-h(\q_t)\|_2^2.
+\label{eq:cmotion}
+\end{equation}
+I clip $s_t$ to $[-1,1]$ before \texttt{arccos} to avoid numerical problems.
+The mathematics already knows this range, but floating point arithmetic
+occasionally needs a reminder.
+
+For $\theta_t=\arccos(s_t)$, define
+$\gamma_t=-4\theta_t/\sin\theta_t$. I add the motion gradient to both
+quaternions in each time step:
+\begin{equation}
+\begin{aligned}
+\mathbf g_{t+1}&\leftarrow
+\mathbf g_{t+1}+\gamma_t\mathbf f_t,\\
+\mathbf g_t&\leftarrow
+\mathbf g_t+\gamma_t(\q_{t+1}\circ E_t^{-1}).
+\end{aligned}
+\label{eq:motiongrad}
+\end{equation}
+Direct division is unstable when $\theta_t=0$, so I use
+$\gamma_t=-4/\sinc(\theta_t/\pi)$~\cite{numpy}. The gravity model and its
+Jacobian are
+\begin{equation}
+\begin{aligned}
+h(\q)&=\begin{bmatrix}
+2(q_xq_z-q_wq_y)\\
+2(q_yq_z+q_wq_x)\\
+q_w^2-q_x^2-q_y^2+q_z^2
+\end{bmatrix},\\
+J(\q)&=2\begin{bmatrix}
+-q_y&q_z&-q_w&q_x\\
+q_x&q_w&q_z&q_y\\
+q_w&-q_x&-q_y&q_z
+\end{bmatrix},\\
+\mathbf g_t&\leftarrow\mathbf g_t-J(\q_t)^\top
+(\mathbf a_t-h(\q_t)).
+\end{aligned}
+\label{eq:obsgrad}
+\end{equation}
+Each optimization step moves against the gradient and normalizes the result:
+\begin{equation}
+\begin{aligned}
+\q^{(k+1)}_t
+&=\frac{\q^{(k)}_t-\alpha\mathbf g_t}
+{\|\q^{(k)}_t-\alpha\mathbf g_t\|_2},\\
+\alpha&=10^{-3},\qquad k=0,\ldots,1499.
+\end{aligned}
+\label{eq:pgd}
+\end{equation}
+I keep the first pose fixed by setting $\mathbf g_0=0$. I also compare the
+analytic gradient with finite differences. The cost decreases smoothly and is
+almost stable before the last iteration, as shown in Figure~\ref{fig:conv}.
+
+\subsection{Panorama}
+
+\subsubsection{Data Preprocessing}
+
+The camera looks along body $x$. Body $y$ points left and body $z$ points up.
+For pixel $(i,j)$, I define
+\begin{equation}
+\begin{aligned}
+c_x&=\frac{W-1}{2}, & c_y&=\frac{H-1}{2},\\
+u_j&=\frac{j-c_x}{W}, & v_i&=\frac{i-c_y}{H}.
+\end{aligned}
+\end{equation}
+Image columns increase to the right and rows increase downward. These directions
+are opposite to body $y$ and $z$, so both angles have a minus sign:
+\begin{equation}
+\lambda_{ij}=-u_j\operatorname{FOV}_h,\qquad
+\varphi_{ij}=-v_i\operatorname{FOV}_v.
+\end{equation}
+Here $\lambda$ is the horizontal angle and $\varphi$ is the vertical angle.
+I use $\operatorname{FOV}_h=60\dg$ and $\operatorname{FOV}_v=45\dg$, matching
+the constants in \texttt{panorama.py}. The corresponding body ray is
+\begin{equation}
+\mathbf r_{ij}=
+\begin{bmatrix}
+\cos\varphi_{ij}\cos\lambda_{ij}\\
+\cos\varphi_{ij}\sin\lambda_{ij}\\
+\sin\varphi_{ij}
+\end{bmatrix},\qquad \|\mathbf r_{ij}\|_2=1.
+\label{eq:ray}
+\end{equation}
+At the image centre, $\lambda=\varphi=0$ and
+$\mathbf r=[1,0,0]^\top$. For each camera frame, I use the latest IMU
+orientation available at that time:
+\begin{equation}
+k(c)=\max\{k:t_k^{\mathrm{IMU}}\leq t_c^{\mathrm{cam}}\}.
+\label{eq:timealign}
+\end{equation}
+This choice prevents the camera frame from using a future orientation.
+
+\subsubsection{Projection and Computational Optimization}
+
+I rotate each body ray into the world frame:
+\begin{equation}
+\mathbf p_{ijc}=R_{k(c)}\mathbf r_{ij}
+=\begin{bmatrix}p_x&p_y&p_z\end{bmatrix}^{\top}.
+\end{equation}
+The world azimuth and elevation are
+\begin{equation}
+\theta=\operatorname{atan2}(p_y,p_x),\qquad
+\psi=\arcsin(p_z),
+\end{equation}
+where $\theta\in(-\pi,\pi]$ and $\psi\in[-\pi/2,\pi/2]$. In the code, $p_z$ is
+clipped to $[-1,1]$ before \texttt{arcsin}. For $H_p=480$ and $W_p=960$, I
+convert these angles to panorama column $m$ and row $n$ with the equirectangular
+projection~\cite{proj}:
+\begin{equation}
+\begin{aligned}
+m&=\left\lfloor\frac{\theta+\pi}{2\pi}(W_p-1)\right\rfloor,\\
+n&=\left\lfloor\frac{\pi/2-\psi}{\pi}(H_p-1)\right\rfloor.
+\end{aligned}
+\label{eq:equirectangular}
+\end{equation}
+The update is $P[n,m]\leftarrow I_c[i,j]$. When pixels overlap, I keep the most
+recent one. There is no numerical optimizer in this part. I compute all camera
+rays once, so each frame only needs one matrix multiplication. I ignore the
+camera offset because the scene is far away, and I use an assumed field of view.
+The code implements the equations directly with NumPy and does not call PROJ.
+Figure~\ref{fig:smallsteps} shows four examples using values from dataset~1.
+
+\begin{figure*}[t]
+\centering
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\figorbox{figures/small_static_window.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\figorbox{figures/small_calibration.png}
+\end{minipage}
+
+\vspace{4pt}
+
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\figorbox{figures/small_motion_step.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\figorbox{figures/small_panorama_pixel.png}
+\end{minipage}
+\caption{Small numerical examples from dataset~1. The panels show static window
+detection, IMU calibration, one dead reckoning update, and one camera pixel
+projected into the panorama.}
+\label{fig:smallsteps}
+\end{figure*}
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Orientation Tracking}
+
+Table~\ref{tab:acc} compares the estimates with VICON. After projected gradient
+descent, the mean roll error decreases from $11.94\dg$ to $1.62\dg$, and the
+mean pitch error decreases from $7.09\dg$ to $1.48\dg$. Roll improves in eight
+datasets and pitch improves in all nine. Yaw improves by only $1.93\dg$ because
+the accelerometer gives no yaw information. Figure~\ref{fig:peraxis} shows this
+same pattern.
+
+The final roll and pitch errors are between $0.98\dg$ and $2.18\dg$. Their
+correlation with the accelerometer calibration residual is $r=0.903$, as shown
+in Figure~\ref{fig:gate}. The complete orientation curves are included in
+Appendix~\ref{app:perdataset}, Figures~\ref{fig:rpy} to~\ref{fig:rpy6to9}.
+
+\begin{table*}[t]
+\centering
+\caption{Mean absolute error vs.\ VICON (degrees), gyroscope only $\to$ PGD.}
+\label{tab:acc}
+\begin{tabular}{lcccc}
+\toprule
+ds            & roll: gyro$\to$PGD        & pitch: gyro$\to$PGD       & yaw: gyro$\to$PGD          & geodesic: gyro$\to$PGD\\
+\midrule
+1             & 15.24 $\to$ \textbf{1.44} & 8.10 $\to$ \textbf{1.01}  & 21.04 $\to$ 13.19          & 17.08 $\to$ 12.98\\
+2             & 14.99 $\to$ \textbf{1.28} & 14.41 $\to$ \textbf{1.08} & 18.97 $\to$ 13.32          & 22.65 $\to$ 13.50\\
+3             & 1.26 $\to$ 1.77           & 2.28 $\to$ \textbf{1.86}  & 14.20 $\to$ 14.46          & 14.64 $\to$ 14.82\\
+4             & 15.87 $\to$ \textbf{2.18} & 5.36 $\to$ \textbf{1.40}  & 38.90 $\to$ 39.04          & 42.25 $\to$ 39.16\\
+5             & 18.57 $\to$ \textbf{1.90} & 9.03 $\to$ \textbf{2.11}  & 18.71 $\to$ 16.74          & 27.46 $\to$ 17.22\\
+6             & 8.27 $\to$ \textbf{1.83}  & 3.07 $\to$ \textbf{1.52}  & 4.68 $\to$ 4.68            & 11.15 $\to$ 5.90\\
+7             & 12.72 $\to$ \textbf{2.08} & 7.99 $\to$ \textbf{1.80}  & 6.28 $\to$ 5.02            & 15.57 $\to$ 5.83\\
+8             & 3.19 $\to$ \textbf{1.10}  & 2.00 $\to$ \textbf{1.31}  & 10.47 $\to$ 10.11          & 11.34 $\to$ 10.49\\
+9             & 17.38 $\to$ \textbf{0.98} & 11.61 $\to$ \textbf{1.25} & 29.61 $\to$ 28.89          & 36.46 $\to$ 29.09\\
+\midrule
+\textbf{mean} & \textbf{11.94 $\to$ 1.62} & \textbf{7.09 $\to$ 1.48}  & \textbf{18.10 $\to$ 16.16} &\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure*}[!t]
+\centering
+\figorbox{figures/summary_peraxis.png}
+\caption{Mean roll, pitch, and yaw error before and after projected gradient
+descent for all nine training datasets.}
+\label{fig:peraxis}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\figorbox{figures/summary_convergence.png}
+\caption{Cost falls monotonically $131.6\to4.34$ (left); geodesic error vs.\
+time (right).}
+\label{fig:conv}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\figorbox{figures/summary_gate_vs_error.png}
+\caption{Accelerometer calibration residual and final roll and pitch error for
+the nine training datasets.}
+\label{fig:gate}
+\end{figure}
+
+Dataset~3 is the only case where the roll error increases, from $1.26\dg$ to
+$1.77\dg$. Its gyroscope estimate is already good, so accelerometer noise moves
+the result slightly away from it. Dataset~4 still has about $39\dg$ of yaw
+error, which is expected because gravity cannot correct yaw.
+
+I also tried fitting new sensor scales from VICON. The accelerometer residual
+changed only from $0.0350$ to $0.0339$~g, while the gyroscope fit became
+unstable. Using the fitted scales increased the errors of datasets 3 and 9 to
+$60.06\dg$ and $69.25\dg$. For this reason, I kept the datasheet values. The
+cost also decreases for test datasets 10 and 11, but their accuracy cannot be
+measured because VICON is not available. Their curves are shown in
+Figure~\ref{fig:rpytest}.
+
+\subsection{Panorama}
+
+The estimated orientations produce recognizable room panoramas.
+Figure~\ref{fig:pano} compares VICON and PGD for dataset~1. The room layout is
+similar, but the whiteboard appears twice in the PGD result. This matches the
+remaining $13.19\dg$ yaw error. The room did not actually grow a second
+whiteboard. Panorama coverage is between $31.6\%$ and
+$80.4\%$. More training examples are shown in Figure~\ref{fig:panotrain}, and
+the test results are shown in Figure~\ref{fig:panotest}.
+
+\begin{figure*}[!t]
+\centering
+\figorbox{figures/summary_panorama.png}
+\caption{VICON vs.\ estimated panorama; the doubled whiteboard is residual yaw.}
+\label{fig:pano}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 2, VICON}\\[2pt]
+\figorbox{figures/pano_ds2_vicon.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 2, PGD}\\[2pt]
+\figorbox{figures/pano_ds2_pgd.png}
+\end{minipage}
+
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 8, VICON}\\[2pt]
+\figorbox{figures/pano_ds8_vicon.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 8, PGD}\\[2pt]
+\figorbox{figures/pano_ds8_pgd.png}
+\end{minipage}
+
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 9, VICON}\\[2pt]
+\figorbox{figures/pano_ds9_vicon.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 9, PGD}\\[2pt]
+\figorbox{figures/pano_ds9_pgd.png}
+\end{minipage}
+\caption{Panoramas from VICON and projected gradient descent for training
+datasets 2, 8, and 9.}
+\label{fig:panotrain}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\textbf{Dataset 10}\\[2pt]
+\figorbox[0.82\textwidth]{figures/pano_ds10_pgd.png}\\[6pt]
+\textbf{Dataset 11}\\[2pt]
+\figorbox[0.82\textwidth]{figures/pano_ds11_pgd.png}
+\caption{Panoramas from projected gradient descent for test datasets 10 and
+11. VICON is not available.}
+\label{fig:panotest}
+\end{figure*}
+
+\section{Discussion}
+\label{sec:discussion}
+
+The main limitation is yaw. Rotating around gravity does not change the
+accelerometer measurement, so yaw depends only on the gyroscope and continues
+to drift. A magnetometer or visual reference would be needed to correct it.
+The method also uses the full trajectory, including future measurements. This
+helps the estimate, but it is not suitable for real time control.
+
+Some settings are chosen manually. These include the camera field of view, the
+static threshold, and equal weights for both cost terms. The model also assumes
+that acceleration mainly comes from gravity. Fast linear motion breaks this
+assumption. Dataset~3 also suggests that using sensor noise to choose the cost
+weights may give a better result.
+
+\FloatBarrier
+\appendices
+\section{Orientation Curves for Each Dataset}
+\label{app:perdataset}
+
+This appendix shows the roll, pitch, and yaw curves for every dataset. The main
+text only uses the summary plots.
+
+\begin{figure*}[!t]
+\centering
+\figorbox[0.88\textwidth]{figures/rpy_ds1.png}
+\caption{Roll, pitch, and yaw for dataset~1. The plot compares VICON, gyroscope
+integration, and projected gradient descent.}
+\label{fig:rpy}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 2}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds2.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 3}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds3.png}
+\end{minipage}
+
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 4}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds4.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 5}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds5.png}
+\end{minipage}
+\caption{Roll, pitch, and yaw for training datasets 2 to 5. Each plot compares
+VICON, gyroscope integration, and projected gradient descent.}
+\label{fig:rpy2to5}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 6}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds6.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 7}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds7.png}
+\end{minipage}
+
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 8}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds8.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 9}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds9.png}
+\end{minipage}
+\caption{Roll, pitch, and yaw for training datasets 6 to 9. Each plot compares
+VICON, gyroscope integration, and projected gradient descent.}
+\label{fig:rpy6to9}
+\end{figure*}
+
+\begin{figure*}[!t]
+\centering
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 10}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds10.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\textbf{Dataset 11}\\[2pt]
+\figorbox[\linewidth]{figures/rpy_ds11.png}
+\end{minipage}
+\caption{Roll, pitch, and yaw from gyroscope integration and projected gradient
+descent for test datasets 10 and 11. VICON is not available.}
+\label{fig:rpytest}
+\end{figure*}
+
+\clearpage
+
+\begin{thebibliography}{5}
+\bibitem{atanasov} N.~Atanasov, ``ECE 276A: Sensing \& Estimation in
+Robotics,'' University of California San Diego. [Online]. Available:
+\url{https://natanaso.github.io/ece276a/index.html}
+\bibitem{numpy} NumPy Developers, ``\texttt{numpy.sinc}.'' [Online]. Available:
+\url{https://numpy.org/doc/stable/reference/generated/numpy.sinc.html}
+\bibitem{numpywindow} NumPy Developers,
+``\texttt{numpy.lib.stride\_tricks.sliding\_window\_view}.'' [Online]. Available:
+\url{https://numpy.org/doc/stable/reference/generated/numpy.lib.stride_tricks.sliding_window_view.html}
+\bibitem{scipyquat} SciPy Developers, ``\texttt{Rotation.as\_quat}.'' [Online]. Available:
+\url{https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.transform.Rotation.as_quat.html}
+\bibitem{proj} PROJ Contributors, ``Equidistant Cylindrical Projection.'' [Online]. Available:
+\url{https://proj.org/en/stable/operations/projections/eqc.html}
+\end{thebibliography}
+
+\end{document}
