@@ -4,32 +4,27 @@ from scipy.spatial import cKDTree
 def kabsch(P, Q) :
     assert P.shape == Q.shape, "Matrix dimensions must match!"
 
-    centroid_P = np.mean(P, axis=0) # find centroids
+    centroid_P = np.mean(P, axis=0)
     centroid_Q = np.mean(Q, axis=0) 
 
-    #center the centroids
     P_centered = P - centroid_P
     Q_centered = Q - centroid_Q
 
-    #define H as the covariance matrix
+    # cross-covariance of the centered points
     H = P_centered.T @ Q_centered
 
-    #perform Singular Value Decomposition at H
     U, Sigma, VT = np.linalg.svd(H)
 
-    #optimal rotation matrix 
     R = VT.T @ U.T
-    # R = U @ VT sabotage attempt to check self.test
 
-    #check if the R values is negative
+    # det < 0 is a mirror image, not a rotation: flip the last axis
     if np.linalg.det(R) < 0 :
         VT[-1, :] *= -1
         R = VT.T @ U.T
     
-    t = centroid_Q - R @ centroid_P # the translation
-    # p rotated is (P - centroid_P) dot R
+    t = centroid_Q - R @ centroid_P
 
-    return R, t, calculate_rmsd(apply_rotation(P, R), Q_centered)# return t too maybe?
+    return R, t, calculate_rmsd(apply_rotation(P, R), Q_centered)
 
 def calculate_rmsd(P_rotated, Q_centered) : # root mean square deviation
     return np.sqrt(np.mean(np.sum((P_rotated - Q_centered) ** 2, axis = 1))) 
@@ -55,7 +50,7 @@ def icp(source, target, T_initial, max_iterations = 50, max_distance = np.inf) :
         T[:d, :d] = R
         T[:d, d] = t
         error = dist[keep].mean()
-        if abs(previous_error - error) < 10**(-6) : #tolerance is 10^-6
+        if abs(previous_error - error) < 10**(-6) :
             break
         previous_error = error
 
