@@ -9,6 +9,10 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Returns:}}
 
 \hyphenpenalty=10000
 \exhyphenpenalty=10000
@@ -21,6 +25,7 @@
 \newcommand{\tb}{\mathbf{t}}
 \newcommand{\x}{\mathbf{x}}
 \newcommand{\step}[1]{\par\noindent\textit{Step #1.}\ }
+\newcommand{\summary}[1]{#1\par}
 
 \begin{document}
 
@@ -60,7 +65,7 @@ T(\x)=\begin{bmatrix}R(\theta) & \tb\\ \mathbf{0}^\top & 1\end{bmatrix}
 which maps a body point to the world: $\p_W=R\p_B+\tb$. The pose of $j$
 relative to $i$ is $T_i^{-1}T_j$. For scan $k$, $T_k=T(\x_k)$ has rotation
 $R_k=R(\theta_k)$ and translation $\tb_k$. The unknowns are the path
-$\{\x_0,\dots,\x_K\}$ (one pose per LiDAR scan), the occupancy map $m$ and
+$\{\x_0,\dots,\x_{K-1}\}$ (one pose for each of the $K$ LiDAR scans), the occupancy map $m$ and
 the floor color map $c$.
 
 \emph{Motion model.} With speed $v_t$, yaw rate $\omega_t$, time step $\tau_t$:
@@ -80,26 +85,44 @@ the floor color map $c$.
 \end{equation}
 ICP solves the same problem when the pairs are unknown.
 
-\emph{Pose graph.} Each edge $(i,j)\in\mathcal{E}$ carries a measured
-relative pose $\mathbf{u}_{ij}=(\mathbf{u}^{xy}_{ij},u^{\theta}_{ij})$ (pose
-$j$ seen from pose $i$, from ICP) with covariance $\Sigma_{ij}$ and
-information matrix $\Omega_{ij}=\Sigma_{ij}^{-1}$. Composing pose $i$ with the
-measurement predicts pose $j$:
+\emph{Pose graph.} The nodes are the poses $\x_0,\dots,\x_{K-1}$, and
+two kinds of edges connect them. Odometry edges follow the motion model:
+the measured motion $\mathbf{u}_k=(\mathbf{u}^{xy}_k,u^\theta_k)$ from scan
+$k-1$ to scan $k$, in the frame of $k-1$, predicts the next pose,
 \begin{equation}
-f(\x_i,\mathbf{u}_{ij})=\begin{bmatrix}\tb_i+R(\theta_i)\,\mathbf{u}^{xy}_{ij}\\ \theta_i+u^{\theta}_{ij}\end{bmatrix},\qquad
-\mathbf{e}_{ij}=\x_j-f(\x_i,\mathbf{u}_{ij}),
-\label{eq:residual}
+\x_k=f(\x_{k-1},\mathbf{u}_k)+\mathbf{w}_k,\quad
+f(\x,\mathbf{u})=\begin{bmatrix}\tb+R(\theta)\,\mathbf{u}^{xy}\\ \theta+u^{\theta}\end{bmatrix}.
+\label{eq:pgmotion}
 \end{equation}
-with the angle entry of $\mathbf{e}_{ij}$ wrapped to $[-\pi,\pi)$. The
-estimate minimizes
+Loop-closure edges are observations: when scans $i$ and $j$ see the same
+walls, ICP between them measures $\mathbf{z}_{ij}$, the pose of $j$ seen
+from $i$, with observation model
 \begin{equation}
-\x^*=\arg\min_{\x}\ \mathcal{J}(\x),\qquad
-\mathcal{J}(\x)=\tfrac12\sum_{(i,j)\in\mathcal{E}}\mathbf{e}_{ij}^\top\Omega_{ij}\,\mathbf{e}_{ij}.
+\mathbf{z}_{ij}=h(\x_i,\x_j)+\mathbf{v}_{ij},\quad
+h(\x_i,\x_j)=\begin{bmatrix}R(\theta_i)^\top(\tb_j-\tb_i)\\ \theta_j-\theta_i\end{bmatrix},
+\label{eq:pgobs}
+\end{equation}
+which is $T_i^{-1}T_j$ written as numbers. With Gaussian noise
+$\mathbf{w}_k\sim\mathcal{N}(\mathbf{0},\Sigma_{\text{odo}})$,
+$\mathbf{v}_{ij}\sim\mathcal{N}(\mathbf{0},\Sigma_{\text{loop}})$ and
+information matrices $\Omega=\Sigma^{-1}$, the most probable path minimizes
+the weighted squared residuals (angles wrapped to $[-\pi,\pi)$):
+\begin{equation}
+\begin{gathered}
+\mathbf{e}_k=\x_k-f(\x_{k-1},\mathbf{u}_k),\qquad
+\mathbf{e}_{ij}=\mathbf{z}_{ij}-h(\x_i,\x_j),\\
+\mathcal{J}(\x)=\tfrac12\sum_k\mathbf{e}_k^\top\Omega_{\text{odo}}\mathbf{e}_k
++\tfrac12\sum_{(i,j)}\mathbf{e}_{ij}^\top\Omega_{\text{loop}}\mathbf{e}_{ij}.
+\end{gathered}
 \label{eq:posegraph}
 \end{equation}
-GTSAM's \code{Pose2} factor writes the same error rotated into the frame of
-the prediction, which leaves $\mathcal{J}$ unchanged because
-$\sigma_x=\sigma_y$ for every edge.
+This is the lecture's Graph SLAM with the landmark term
+$\mathbf{z}-h(\x,\mathbf{m})$ replaced by $\mathbf{z}_{ij}-h(\x_i,\x_j)$: the
+map is not in the state but is built afterwards from the optimized poses.
+GTSAM stores both edge types as relative-pose factors. Since
+$\sigma_x=\sigma_y$, the two residual forms give the same cost (in $x,y$,
+$\x_k-f=-R(\theta_{k-1})(\mathbf{u}_k-h)$), and GTSAM's own error agrees for
+small angle errors (2.09836 vs.\ 2.09835 at 0.01\,rad).
 
 \emph{Occupancy grid.} Each cell $m_i$ holds the log-odds
 $\lambda_i=\log\frac{p(m_i=1\mid z_{1:t})}{p(m_i=0\mid z_{1:t})}$, with
@@ -128,7 +151,7 @@ Function & Input & Returns \\
 \code{match\_scans(d, poses\_T, i, j, \dots)} & two scan numbers & \code{T\_relative, inlier\_ratio}: pose of $j$ relative to $i$, share of points within 10\,cm \\
 \code{pose\_graph(d, icp\_poses)} & data, (K, 3) ICP poses & (K, 3) optimized poses \\
 \code{occupancy\_map(d, poses)} & data, (K, 3) poses & \code{map\_info, grid, snapshots}: 1600$\times$1600 log-odds grid + 4 copies over time \\
-\code{camera\_to\_body()} & none & $3\times3$ rotation, Kinect frame $\to$ body frame \\
+\code{camera\_to\_body()} & none & $3\times3$ rotation, camera frame $\to$ body frame \\
 \code{texture\_map(d, dataset, poses)} & data, poses & \code{map\_info, texture, snapshots}: 1600$\times$1600$\times$3 color image + 4 copies \\
 \bottomrule
 \end{tabular}
@@ -165,6 +188,10 @@ Function & Input & Returns \\
 %----------------------------------------------------------------------
 \subsection{Odometry}
 
+\summary{Finds a first path from the wheels and the gyro. Input: encoder
+counts and IMU yaw rate. Returns one pose $(x,y,\theta)$ per encoder reading
+(4956 for dataset 20). Errors add up step by step, so the path drifts.}
+
 \step{1} Distance per tick, wheel diameter $D=0.254$\,m, 360 ticks per turn:
 $s=\pi D/360\approx0.0022$\,m.
 
@@ -186,8 +213,30 @@ $z$-axis gyro at the nearest IMU time stamp.
 \step{5} Integrate with the Euler step~\eqref{eq:motion}, assuming $v$ and
 $\omega$ constant over each $\tau$.
 
+\begin{algorithm}[H]
+\caption{Odometry}\label{alg:odometry}
+\footnotesize
+\begin{algorithmic}[1]
+\Require counts $FR,FL,RR,RL$, stamps, IMU yaw rate
+\Ensure $\x_t=(x_t,y_t,\theta_t)$ for $t=0,\dots,N-1$
+\State $\x_0\gets(0,0,0)$
+\For{$t=1,\dots,N-1$}
+  \State $\tau\gets$ stamp$_t-$stamp$_{t-1}$
+  \State $d_R\gets(FR_t+RR_t)\,s/2$,\ \ $d_L\gets(FL_t+RL_t)\,s/2$
+  \State $v\gets(d_R+d_L)/(2\tau)$,\ \ $\omega\gets$ IMU yaw rate nearest in time
+  \State $\theta_t\gets\theta_{t-1}+\omega\tau$
+  \State $(x_t,y_t)\gets(x_{t-1},y_{t-1})+v\tau(\cos\theta_t,\sin\theta_t)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
 %----------------------------------------------------------------------
 \subsection{Kabsch algorithm (known pairs)}
+
+\summary{Finds the rotation and translation that best move point set $P$
+onto $Q$ when row $k$ of $P$ belongs with row $k$ of $Q$. Returns $R$,
+$\tb$ and the RMSD (root mean square distance) of the aligned points. No
+iteration: one SVD gives the exact answer.}
 
 \step{1} Objective~\eqref{eq:registration}:
 $E(R,\tb)=\sum_k\lVert\q_k-R\p_k-\tb\rVert^2$.
@@ -227,7 +276,7 @@ H=U\Sigma V^\top,\quad U^\top U=V^\top V=I,\\
 \end{gathered}
 \end{equation}
 i.e.\ a rotation (or reflection), a scaling along the axes, and another
-rotation. $\sigma_i$ are the singular values.
+rotation (or reflection). $\sigma_i$ are the singular values.
 
 \step{6} Bound. By the cyclic property of the trace,
 \begin{equation}
@@ -248,8 +297,28 @@ R^*=V\operatorname{diag}\!\big(1,\dots,1,\det(VU^\top)\big)U^\top,
 which the code does by negating the last row of $V^\top$. A self-test
 rotates a random cloud by $40^\circ$ and recovers $R$ and $\tb$ exactly.
 
+\begin{algorithm}[H]
+\caption{Kabsch}\label{alg:kabsch}
+\footnotesize
+\begin{algorithmic}[1]
+\Require $P,Q\in\mathbb{R}^{N\times d}$, row $k$ paired with row $k$
+\Ensure $R$, $\tb$, RMSD
+\State $\bar\p,\bar\q\gets$ means of the rows;\ \ $P'\gets P-\bar\p$,\ \ $Q'\gets Q-\bar\q$
+\State $H\gets P'^\top Q'$ \Comment{$d\times d$}
+\State $U,\Sigma,V^\top\gets\operatorname{SVD}(H)$
+\State $R\gets V\operatorname{diag}(1,\dots,1,\det(VU^\top))\,U^\top$
+\State $\tb\gets\bar\q-R\bar\p$
+\State \Return $R$, $\tb$, $\sqrt{\tfrac1N\sum_k\lVert R\p'_k-\q'_k\rVert^2}$
+\end{algorithmic}
+\end{algorithm}
+
 %----------------------------------------------------------------------
 \subsection{ICP (unknown pairs)}
+
+\summary{Finds the transform $T$ that moves a source point set onto a target
+point set when the pairs are unknown, by alternating two steps: guess the
+pairs (nearest neighbors), then solve Kabsch on them. Input: source, target,
+initial guess $T^0$. Returns the final $T$ and the mean pair distance.}
 
 \step{1} Start from $T^0$ and build a KD-tree on the target once.
 
@@ -265,7 +334,8 @@ j(k)=\arg\min_j\lVert\q_j-\tilde\p_k\rVert .
 \mathcal{I}=\{k:\lVert\q_{j(k)}-\tilde\p_k\rVert<d_{\max}\}.
 \end{equation*}
 
-\step{5} Update with Kabsch on the kept pairs:
+\step{5} Update with Kabsch on the kept pairs, using the original $\p_k$, so
+the result is the full transform, not an increment:
 \begin{equation*}
 (R^{n+1},\tb^{n+1})=\text{Kabsch}\big(\{\p_k,\q_{j(k)}\}_{k\in\mathcal{I}}\big).
 \end{equation*}
@@ -278,7 +348,7 @@ e^n=\frac{1}{|\mathcal{I}|}\sum_{k\in\mathcal{I}}\lVert\q_{j(k)}-\tilde\p_k\rVer
 \end{gathered}
 \end{equation*}
 
-\emph{Convergence.} With $E(T,j)$ the error for transform $T$ and pairing $j$,
+\emph{Convergence.} With $E(T,j)$ the squared error~\eqref{eq:registration} for transform $T$ and pairing $j$,
 \begin{equation}
 E(T^n,j^n)\ \ge\ E(T^n,j^{n+1})\ \ge\ E(T^{n+1},j^{n+1}),
 \end{equation}
@@ -296,8 +366,31 @@ hidden back of the model has none in the view. ICP is started from 12 yaws
 every 10th view point; the start with the lowest error is refined with all
 view points.
 
+\begin{algorithm}[H]
+\caption{ICP}\label{alg:icp}
+\footnotesize
+\begin{algorithmic}[1]
+\Require source $\{\p_k\}$, target $\{\q_j\}$, $T^0$, $d_{\max}$
+\Ensure $T$ (source $\to$ target), mean pair distance $e$
+\State build a KD-tree of the target;\ \ $e^{-1}\gets\infty$
+\For{$n=0,\dots,49$}
+  \State $\tilde\p_k\gets R^n\p_k+\tb^n$ for all $k$
+  \State $j(k)\gets$ nearest target point to $\tilde\p_k$ \Comment{new pairs}
+  \State $\mathcal{I}\gets\{k:\lVert\q_{j(k)}-\tilde\p_k\rVert<d_{\max}\}$
+  \State $e^n\gets$ mean of $\lVert\q_{j(k)}-\tilde\p_k\rVert$ over $\mathcal{I}$
+  \State $(R^{n+1},\tb^{n+1})\gets\text{Kabsch}(\{\p_k\},\{\q_{j(k)}\})_{k\in\mathcal{I}}$ \Comment{new $T$}
+  \State \textbf{if} $|e^{n-1}-e^n|<10^{-6}$ \textbf{then break}
+\EndFor
+\State \Return $T^{n+1}$, $e^n$
+\end{algorithmic}
+\end{algorithm}
+
 %----------------------------------------------------------------------
 \subsection{LiDAR scan matching}
+
+\summary{Finds the pose of every LiDAR scan by matching it with ICP against a
+keyframe scan, starting from the odometry motion. Returns $K$ poses (4962
+for dataset 20). Less drift than odometry, but still some.}
 
 \step{1} Ranges to body points: for beam $n$ with range $r_n$,
 $\alpha_n=\alpha_{\min}+n\Delta\alpha$ and
@@ -319,103 +412,267 @@ $O_{k-1}^{-1}O_k$ is the odometry step in the robot frame, so it can be
 stacked on the ICP pose $T_{k-1}$ even after the two paths drift apart.
 
 \step{4} Match and compose:
-$T_{\text{rel}}=\text{ICP}(S_k,S_{\text{kf}},T^0)$, $T_k=T_{\text{kf}}T_{\text{rel}}$.
+$T_{\text{rel}}=\text{ICP}(S_k,S_{\text{kf}},T^0)$ with $d_{\max}=0.5$\,m, then $T_k=T_{\text{kf}}T_{\text{rel}}$.
 
 \step{5} Scan $k$ becomes the keyframe when $\lVert\tb_{\text{rel}}\rVert>0.5$\,m
 or $|\theta_{\text{rel}}|>0.2$\,rad. Consecutive scans are only 2\,cm apart;
 ICP under-reports such a small motion in a hallway, and chaining 4962 such
 steps made the hallways too short.
 
+\begin{algorithm}[H]
+\caption{Scan matching}\label{alg:scanmatching}
+\footnotesize
+\begin{algorithmic}[1]
+\Require scans $S_k$, odometry poses $O_k$ (nearest in time)
+\Ensure ICP poses $T_0,\dots,T_{K-1}$
+\State $T_0\gets O_0$;\ \ $\text{kf}\gets0$
+\For{$k=1,\dots,K-1$}
+  \State $T^0\gets T_{\text{kf}}^{-1}T_{k-1}O_{k-1}^{-1}O_k$ \Comment{initial guess}
+  \State $T_{\text{rel}}\gets\text{ICP}(S_k,S_{\text{kf}},T^0,d_{\max}{=}0.5)$
+  \State $T_k\gets T_{\text{kf}}T_{\text{rel}}$
+  \State \textbf{if} $\lVert\tb_{\text{rel}}\rVert>0.5$ or $|\theta_{\text{rel}}|>0.2$ \textbf{then} $\text{kf}\gets k$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
 %----------------------------------------------------------------------
 \subsection{Pose graph optimization}
 
-\step{1} Variables: $\x=(\x_0,\dots,\x_K)$, initialized with the ICP poses.
+\summary{Finds the path that best agrees with all measurements at once.
+Input: ICP poses and scans. Returns $K$ optimized poses. Iterative: each
+Levenberg-Marquardt step moves all poses a little.}
 
-\step{2} Edges $\mathcal{E}$, each with $\mathbf{e}_{ij}$ from \eqref{eq:residual}:
-\begin{itemize}
-\item prior on $\x_0$: $\mathbf{e}_0=\x_0-\bar{\x}_0$ ($\bar{\x}_0$ the first ICP pose), $\sigma=10^{-3}$;
-\item odometry $(k-1,k)$: $\mathbf{u}$ = ICP step $T_{k-1}^{-1}T_k$,
-      $\sigma=(0.01,0.01,0.005)$;
-\item fixed-interval loops $(i,i+10)$, ICP with $d_{\max}=0.5$\,m;
-\item proximity loops $(i,j)$, every 20th scan, $\lVert\tb_i-\tb_j\rVert<2$\,m
-      and $j-i\ge500$, ICP with $d_{\max}=1.0$\,m.
-\end{itemize}
-A loop edge $\mathbf{u}_{ij}=\text{ICP}(S_j,S_i,T_i^{-1}T_j)$ is kept only if
-its inlier ratio
-\begin{equation}
-\rho_{ij}=\frac1N\sum_k\mathbf{1}\Big[\min_{\q\in S_i}\lVert U_{ij}\p_k-\q\rVert<0.1\Big]\ge0.6,
-\end{equation}
-with $U_{ij}$ the matrix form of $\mathbf{u}_{ij}$. Loop edges use
-$\sigma=(0.1,0.1,0.05)$.
+\emph{Idea.} Every pose is a node and every measurement between two poses
+is an edge, like a spring that says ``pose $j$ should sit here as seen from
+pose $i$''. Odometry edges link consecutive poses; loop-closure edges link
+two visits to the same place. The optimizer moves all poses at once until
+the springs are as relaxed as possible; a smaller $\sigma$ is a stiffer
+spring.
 
-\step{3} Robust cost. With the whitened error
-$\varepsilon_{ij}=\sqrt{\mathbf{e}_{ij}^\top\Omega_{ij}\mathbf{e}_{ij}}$,
+\step{1} Nodes: $\x=(\x_0,\dots,\x_{K-1})$, $3K=14886$ unknowns, starting
+at the ICP poses. The map is not in the state; it is drawn afterwards from
+the final poses.
+
+\step{2} Odometry edges. $\mathbf{u}_k=T_{k-1}^{-1}T_k$ is the ICP step from
+scan $k-1$ to scan $k$, in the frame of $k-1$. Composing the two matrices
+gives the motion model~\eqref{eq:pgmotion}:
 \begin{equation}
 \begin{gathered}
-\mathcal{J}(\x)=\sum_{\text{prior, odo}}\tfrac12\varepsilon_{ij}^2+\sum_{\text{loop}}\rho_H(\varepsilon_{ij}),\\
-\rho_H(\varepsilon)=\begin{cases}\tfrac12\varepsilon^2,&\varepsilon\le1\\ \varepsilon-\tfrac12,&\varepsilon>1\end{cases}
+T_{k-1}U_k=\begin{bmatrix}R_{k-1}R(u^\theta_k)&\tb_{k-1}+R_{k-1}\mathbf{u}^{xy}_k\\ \mathbf{0}^\top&1\end{bmatrix}\\
+\Rightarrow\ f(\x_{k-1},\mathbf{u}_k)=\begin{bmatrix}\tb_{k-1}+R_{k-1}\mathbf{u}^{xy}_k\\ \theta_{k-1}+u^\theta_k\end{bmatrix},
 \end{gathered}
 \end{equation}
-$\rho_H$ grows linearly for large $\varepsilon$, so a wrong loop pulls with
-bounded force.
+with residual $\mathbf{e}_k=\x_k-f(\x_{k-1},\mathbf{u}_k)$ and
+$\sigma=(0.01,0.01,0.005)$.
 
-\step{4} Linearize around the current estimate $\x^{(n)}$:
-$\mathbf{e}_{ij}(\x^{(n)}+\delta\x)\approx\mathbf{e}_{ij}+J_i\,\delta\x_i+J_j\,\delta\x_j$.
-Differentiating \eqref{eq:residual}, with
-$\frac{d}{d\theta}R(\theta)=R(\theta)S$ and $S=\left[\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\right]$,
+\step{3} Loop-closure edges. When the robot comes back to a place, ICP
+between the old scan $i$ and the new scan $j$ measures $\mathbf{z}_{ij}$,
+the pose of $j$ seen from $i$, directly from the walls, so it does not
+contain the drift built up in between. The prediction is the relative
+pose~\eqref{eq:pgobs}:
 \begin{equation}
-J_i=\frac{\partial\mathbf{e}_{ij}}{\partial\x_i}=
-\begin{bmatrix}-I_2 & -R(\theta_i)S\,\mathbf{u}^{xy}_{ij}\\ \mathbf{0}^\top & -1\end{bmatrix},\qquad
-J_j=\frac{\partial\mathbf{e}_{ij}}{\partial\x_j}=I_3 .
+\begin{gathered}
+T_i^{-1}T_j=\begin{bmatrix}R_i^\top R_j&R_i^\top(\tb_j-\tb_i)\\ \mathbf{0}^\top&1\end{bmatrix}\\
+\Rightarrow\ h(\x_i,\x_j)=\begin{bmatrix}R_i^\top(\tb_j-\tb_i)\\ \theta_j-\theta_i\end{bmatrix},
+\end{gathered}
 \end{equation}
+with residual $\mathbf{e}_{ij}=\mathbf{z}_{ij}-h(\x_i,\x_j)$. Pairs are found
+in two ways: fixed-interval pairs $(i,i+10)$, with ICP $d_{\max}=0.5$\,m;
+and proximity pairs among every 20th scan, closer than 2\,m in the ICP path
+but at least 500 scans apart in time, with $d_{\max}=1.0$\,m. ICP starts
+from $T_i^{-1}T_j$. ICP returns an answer even for scans that do not
+overlap, so a match is kept only if most of scan $j$ lands on scan $i$:
+\begin{equation}
+\rho_{ij}=\frac{\#\{\p\in S_j:\ d(Z_{ij}\p,\,S_i)<0.1\,\text{m}\}}{|S_j|}\ \ge\ 0.6,
+\end{equation}
+where $Z_{ij}$ moves scan $j$ by the ICP result and $d(\q,S_i)$ is the
+distance from $\q$ to the nearest point of $S_i$. Loop edges use
+$\sigma=(0.1,0.1,0.05)$, ten times looser than odometry.
 
-\step{5} Quadratic model and its minimum. Substituting into
-\eqref{eq:posegraph} and setting the gradient with respect to $\delta\x$
-to zero gives the normal equations $H\,\delta\x=-\mathbf{b}$, assembled edge by
-edge:
+\step{4} Prior: $\mathbf{e}_0=\x_0-\bar{\x}_0$ ($\bar{\x}_0$ the first ICP
+pose), $\sigma=10^{-3}$. Step 10 explains why it is needed.
+
+\step{5} Cost from probability. The estimate is the most probable path,
+$\arg\max_{\x}p(\x\mid\mathbf{u},\mathbf{z})$. If each measurement depends
+only on the two poses it links and the noises are independent,
+\begin{equation}
+p(\x\mid\mathbf{u},\mathbf{z})\propto p(\x_0)\prod_k p(\x_k\mid\x_{k-1},\mathbf{u}_k)\prod_{(i,j)}p(\mathbf{z}_{ij}\mid\x_i,\x_j).
+\end{equation}
+Each factor is Gaussian, $\propto\exp(-\tfrac12\mathbf{e}^\top\Omega\,\mathbf{e})$
+with $\Omega=\Sigma^{-1}=\operatorname{diag}(1/\sigma_x^2,1/\sigma_y^2,1/\sigma_\theta^2)$,
+so $-\log$ turns the product into the sum $\mathcal{J}$
+of~\eqref{eq:posegraph} plus $\tfrac12\mathbf{e}_0^\top\Omega_0\mathbf{e}_0$:
+the most probable path is the weighted least-squares path. Since the
+$\mathbf{u}_k$ come from the ICP poses, without loop closures the ICP path
+makes every residual zero. Only the loop closures change the path; the
+optimizer spreads their disagreement over all edges.
+
+\step{6} Robust loop edges. Let
+$\varepsilon=\sqrt{\mathbf{e}^\top\Omega\,\mathbf{e}}$ be the size of a
+residual in sigmas. In least squares an edge costs $\tfrac12\varepsilon^2$
+and pulls with force $\varepsilon$ (the slope), so a wrong loop closure
+$10\sigma$ off pulls with 10 and can bend the map. Loop edges therefore use
+the Huber cost, built from the pull: keep the least-squares pull for small
+errors, cap it at 1 for large ones, and integrate the pull to get the cost:
 \begin{equation}
 \begin{aligned}
-H_{ii}&\mathrel{+}=J_i^\top\Omega_{ij}J_i, & H_{ij}&\mathrel{+}=J_i^\top\Omega_{ij}J_j,\\
-H_{ji}&\mathrel{+}=J_j^\top\Omega_{ij}J_i, & H_{jj}&\mathrel{+}=J_j^\top\Omega_{ij}J_j,\\
-\mathbf{b}_i&\mathrel{+}=J_i^\top\Omega_{ij}\mathbf{e}_{ij}, & \mathbf{b}_j&\mathrel{+}=J_j^\top\Omega_{ij}\mathbf{e}_{ij}.
+\psi(\varepsilon)&=\rho_H'(\varepsilon)=\min(\varepsilon,1),\\
+\varepsilon\le1:\ \rho_H(\varepsilon)&=\textstyle\int_0^{\varepsilon}s\,ds=\tfrac12\varepsilon^2,\\
+\varepsilon>1:\ \rho_H(\varepsilon)&=\textstyle\int_0^{1}s\,ds+\int_1^{\varepsilon}1\,ds=\varepsilon-\tfrac12.
+\end{aligned}
+\end{equation}
+Both pieces give $\tfrac12$ with slope 1 at $\varepsilon=1$, so the cost has
+no jump or kink. As a probability, $\exp(-\rho_H)$ has heavier tails than a
+Gaussian: a large error is rare but possible, so a bad match is treated as
+a mistake and not explained by bending the map. Gauss-Newton needs squares,
+so each iteration writes $\rho_H\approx\tfrac12w\varepsilon^2$ with
+$w=\psi(\varepsilon)/\varepsilon=\min(1,1/\varepsilon)$, i.e.\ the loop
+edge's $\Omega$ is scaled by $w$ ($w=0.1$ for an edge $10\sigma$ off).
+
+\step{7} Linearize. $\mathcal{J}$ is not quadratic in $\x$ because $R(\theta)$
+contains $\cos$ and $\sin$, so it is minimized by iterating: near the
+current guess $\x^{(n)}$, each residual is replaced by a straight line.
+A residual depends on two poses $a,b$:
+\begin{equation}
+\begin{gathered}
+\mathbf{e}(\x^{(n)}+\delta\x)\approx\mathbf{e}+A\,\delta\x_a+B\,\delta\x_b,\\
+A=\frac{\partial\mathbf{e}}{\partial\x_a},\qquad B=\frac{\partial\mathbf{e}}{\partial\x_b},
+\end{gathered}
+\end{equation}
+i.e.\ $A$ says how the residual changes when pose $a$ moves a little, and
+$B$ the same for pose $b$. The derivative of a rotation is
+\begin{equation}
+\begin{gathered}
+\frac{dR}{d\theta}=\begin{bmatrix}-\sin\theta&-\cos\theta\\ \cos\theta&-\sin\theta\end{bmatrix}=R\,S,\quad
+S=\begin{bmatrix}0&-1\\1&0\end{bmatrix},\\
+\frac{dR^\top}{d\theta}=(RS)^\top=-S R^\top.
+\end{gathered}
+\end{equation}
+Odometry: $\mathbf{e}^{xy}_k=\tb_k-\tb_{k-1}-R_{k-1}\mathbf{u}^{xy}_k$ and
+$e^\theta_k=\theta_k-\theta_{k-1}-u^\theta_k$, so entry by entry
+\begin{equation}
+A=\begin{bmatrix}-I_2&-R_{k-1}S\,\mathbf{u}^{xy}_k\\ \mathbf{0}^\top&-1\end{bmatrix},\qquad B=I_3.
+\end{equation}
+Loop: $\mathbf{e}^{xy}_{ij}=\mathbf{z}^{xy}_{ij}-R_i^\top(\tb_j-\tb_i)$ and
+$e^\theta_{ij}=z^\theta_{ij}-\theta_j+\theta_i$, so
+\begin{equation}
+A=\begin{bmatrix}R_i^\top&S R_i^\top(\tb_j-\tb_i)\\ \mathbf{0}^\top&1\end{bmatrix},\qquad
+B=\begin{bmatrix}-R_i^\top&\mathbf{0}\\ \mathbf{0}^\top&-1\end{bmatrix}.
+\end{equation}
+
+\step{8} Normal equations. With the straight-line residuals, each edge's
+cost becomes a quadratic in $\delta\x$:
+\begin{equation}
+\begin{aligned}
+&\tfrac12(\mathbf{e}+J\delta\x)^\top\Omega(\mathbf{e}+J\delta\x)\\
+&=\tfrac12\mathbf{e}^\top\Omega\mathbf{e}+\delta\x^\top J^\top\Omega\mathbf{e}+\tfrac12\delta\x^\top J^\top\Omega J\,\delta\x,
+\end{aligned}
+\end{equation}
+where $J$ is the edge's row of blocks: $A$ at pose $a$, $B$ at pose $b$,
+zero elsewhere. Summing over edges,
+$\mathcal{J}\approx\text{const}+\delta\x^\top\mathbf{b}+\tfrac12\delta\x^\top H\delta\x$
+with $H=\sum J^\top\Omega J$ and $\mathbf{b}=\sum J^\top\Omega\,\mathbf{e}$.
+Setting the gradient $\mathbf{b}+H\delta\x$ to zero gives
+$H\,\delta\x=-\mathbf{b}$. $H$ is a table of $3\times3$ blocks, one per pair
+of poses. An edge involves only poses $a$ and $b$, so it adds to only four
+blocks of $H$ and two of $\mathbf{b}$:
+\begin{equation}
+\begin{aligned}
+H_{aa}&\mathrel{+}=A^\top\Omega A, & H_{ab}&\mathrel{+}=A^\top\Omega B,\\
+H_{ba}&\mathrel{+}=B^\top\Omega A, & H_{bb}&\mathrel{+}=B^\top\Omega B,\\
+\mathbf{b}_a&\mathrel{+}=A^\top\Omega\,\mathbf{e}, & \mathbf{b}_b&\mathrel{+}=B^\top\Omega\,\mathbf{e}.
 \end{aligned}
 \end{equation}
 The prior adds $\Omega_0$ to $H_{00}$ and $\Omega_0\mathbf{e}_0$ to $\mathbf{b}_0$.
 
-\step{6} Levenberg-Marquardt step and update:
+\step{9} Update and iterate (Levenberg-Marquardt):
 \begin{equation}
 (H+\mu I)\,\delta\x=-\mathbf{b},\qquad \x^{(n+1)}=\x^{(n)}+\delta\x
 \end{equation}
-(angles wrapped). If $\mathcal{J}$ dropped, $\mu$ decreases (toward
-Gauss-Newton); otherwise the step is rejected and $\mu$ increases (toward
-gradient descent). Repeat until $\delta\x$ is small.
+(angles wrapped). In every iteration $\mathbf{u}$, $\mathbf{z}$ and $\Omega$
+stay fixed, while $\mathbf{e}$, $A$, $B$, $H$ and $\mathbf{b}$ are
+recomputed at $\x^{(n)}$. With $\mu\to0$ the step is Gauss-Newton,
+$-H^{-1}\mathbf{b}$; with large $\mu$ it is $-\mathbf{b}/\mu$, a short step
+downhill, since $\mathbf{b}$ is the gradient of $\mathcal{J}$. If
+$\mathcal{J}$ dropped, the step is kept and $\mu$ decreases; otherwise it is
+rejected and $\mu$ increases. GTSAM stops when $\mathcal{J}$ decreases by
+less than $10^{-5}$ (relative or absolute), or after 100 iterations.
 
-\step{7} Prior and sparsity. Without the prior, shifting or rotating the
-whole path leaves $\mathcal{J}$ unchanged, so the minimum is not unique and
-$H$ is singular. Each edge touches 2 poses, so $H$ ($14886\times14886$)
-has non-zero blocks only on the diagonal and at edge pairs, and is solved
-by sparse elimination. For one test factor,
-$\tfrac12\sum(e/\sigma)^2=10.5001$ by hand and from \code{factor.error()},
-and a plain implementation of steps 2 to 6 on a 5-pose test loop matched
-GTSAM's optimum to $3\times10^{-8}$.
+\step{10} Prior and sparsity. Shifting every pose by the same $\mathbf{a}$,
+$\delta\x_a=\delta\x_b=(\mathbf{a},0)$, gives
+$A\delta\x_a+B\delta\x_b=-\mathbf{a}+\mathbf{a}=\mathbf{0}$ for odometry and
+$R_i^\top\mathbf{a}-R_i^\top\mathbf{a}=\mathbf{0}$ for loops, so
+$H\delta\x=\mathbf{0}$: relative measurements say nothing about where the
+whole map sits, and $H$ is singular. The prior adds $\Omega_0=10^6I$ to
+$H_{00}$, which removes this. Each edge touches 2 poses, so only
+$4962+2\cdot5578$ of the $4962^2$ blocks of $H$ are non-zero (about
+0.07\,\%), and sparse elimination solves it fast.
 
-The small odometry $\sigma$ is deliberate: with $\sigma=5$\,cm the loop
-closures shrank the path to 86.5\,m (Table~\ref{tab:tuning}), because
-sliding along a corridor barely changes scan overlap.
+\begin{algorithm}[H]
+\caption{Pose graph optimization}\label{alg:posegraph}
+\footnotesize
+\begin{algorithmic}[1]
+\Require ICP poses $T_k$, scans $S_k$
+\Ensure optimized poses $\x^*$
+\State add prior on $\x_0$; add odometry edges $\mathbf{u}_k=T_{k-1}^{-1}T_k$
+\For{each candidate pair $(i,j)$}
+  \State $\mathbf{z}_{ij}\gets\text{ICP}(S_j,S_i,T_i^{-1}T_j)$
+  \State \textbf{if} $\rho_{ij}\ge0.6$ \textbf{then} add loop edge $(i,j,\mathbf{z}_{ij})$, Huber
+\EndFor
+\State $\x^{(0)}\gets$ ICP poses
+\Repeat \Comment{$n=0,1,\dots$}
+  \State $\mathbf{e},A,B$ of every edge at $\x^{(n)}$; build $H$, $\mathbf{b}$
+  \State solve $(H+\mu I)\,\delta\x=-\mathbf{b}$
+  \If{$\mathcal{J}(\x^{(n)}+\delta\x)<\mathcal{J}(\x^{(n)})$}
+    \State $\x^{(n+1)}\gets\x^{(n)}+\delta\x$;\ \ decrease $\mu$
+  \Else
+    \State $\x^{(n+1)}\gets\x^{(n)}$;\ \ increase $\mu$
+  \EndIf
+\Until{$\mathcal{J}$ decreases by less than $10^{-5}$, or 100 iterations}
+\State \Return $\x^{(n)}$
+\end{algorithmic}
+\end{algorithm}
+
+\emph{Example.} Three poses on a line, all $\Omega=I$, the prior holding
+$x_0=0$. Odometry says $0\to1$ and $1\to2$ are each 1\,m; a loop closure
+says $z_{02}=1.8$\,m. The residuals are $e_{01}=x_1-x_0-1$,
+$e_{12}=x_2-x_1-1$ and $e_{02}=1.8-(x_2-x_0)$. Iteration 1, at $x_1=1$,
+$x_2=2$: residuals $(0,0,-0.2)$, $\mathcal{J}=0.02$. Their derivatives with
+respect to $(x_1,x_2)$ are $(1,0)$, $(-1,1)$ and $(0,-1)$, so
+$H=\sum J^\top J=\left[\begin{smallmatrix}2&-1\\-1&2\end{smallmatrix}\right]$,
+$\mathbf{b}=\sum J^\top e=(0,0.2)$ and
+$\delta\x=-H^{-1}\mathbf{b}=(-0.067,-0.133)$. Iteration 2, at $x_1=0.933$,
+$x_2=1.867$: residuals $(-0.067,-0.067,-0.067)$, $\mathcal{J}=0.0067$,
+$\mathbf{b}=0$, so it stops. The 0.2\,m disagreement is shared equally; with
+unequal $\Omega$, the stiffer edges keep smaller residuals.
+
+Checks: for one test factor, $\tfrac12\sum(e/\sigma)^2=10.5001$ by hand and
+from \code{factor.error()}; steps 7 to 9 coded by hand on a 5-pose test loop
+reach GTSAM's optimum to $3\times10^{-8}$, and both Jacobians match finite
+differences. The small odometry $\sigma$ is deliberate: with $\sigma=5$\,cm
+the loop closures shrank the path to 86.5\,m (Table~\ref{tab:tuning}). A
+likely reason: in a straight corridor, sliding one scan along the other
+barely changes the overlap, so loop matches are weak along the corridor,
+and loose odometry edges let them pull the hallways shorter.
 
 %----------------------------------------------------------------------
 \subsection{Occupancy grid mapping}
 
+\summary{Finds which grid cells contain walls. Input: optimized poses and
+scans. Returns a $1600\times1600$ grid of log-odds (positive = wall, negative
+= free, 0 = never seen). Each beam lowers the cells it passes through and
+raises the cell where it ends.}
+
 \step{1} Beams in the world: $\p_W=R_k\p+\tb_k$ and LiDAR origin
 $\mathbf{o}=T_k[0.133,0,1]^\top$.
 
-\step{2} Cell index with resolution $r=0.05$\,m and map corner $\mathbf{m}_{\min}$:
+\step{2} Cell index with resolution $r=0.05$\,m and map corner $\mathbf{m}_{\min}=(-30,-30)$\,m:
 $\operatorname{cell}(\p)=\lfloor(\p-\mathbf{m}_{\min})/r\rfloor$, on a $1600\times1600$ grid.
 
 \step{3} Cells on each beam: $\{c_1,\dots,c_L\}=\text{Bresenham}\big(\operatorname{cell}(\mathbf{o}),\operatorname{cell}(\p_W)\big)$.
 
 \step{4} Bayes' rule for one cell:
-$p(m\mid z_{1:t})=\eta\,p(z_t\mid m)\,p(m\mid z_{1:t-1})$.
+$p(m\mid z_{1:t})=\eta\,p(z_t\mid m)\,p(m\mid z_{1:t-1})$, with normalizer $\eta=1/p(z_t\mid z_{1:t-1})$.
 
 \step{5} Divide the expression for $m=1$ by the one for $m=0$; $\eta$ cancels:
 \begin{equation}
@@ -436,8 +693,34 @@ can still change. Every 2nd scan is used.
 
 \step{8} Probability: $p(m{=}1)=1-\dfrac{1}{1+e^{\lambda}}$ (the logistic function).
 
+\begin{algorithm}[H]
+\caption{Occupancy grid}\label{alg:occupancy}
+\footnotesize
+\begin{algorithmic}[1]
+\Require poses $T_k$, scans $S_k$
+\Ensure log-odds grid $\lambda$
+\State $\lambda\gets0$ ($1600\times1600$)
+\For{$k=0,2,4,\dots$} \Comment{every 2nd scan}
+  \State $\mathbf{o}\gets\operatorname{cell}(T_k[0.133,0,1]^\top)$
+  \For{each $\p\in S_k$}
+    \State $c_1,\dots,c_L\gets\text{Bresenham}(\mathbf{o},\operatorname{cell}(R_k\p+\tb_k))$
+    \State $\lambda(c_1..c_{L-1})\mathrel{-}=\log4$;\ \ $\lambda(c_L)\mathrel{+}=\log4$
+  \EndFor
+  \State clip $\lambda$ to $[-20,20]$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
 %----------------------------------------------------------------------
 \subsection{Floor texture mapping}
+
+\summary{Finds the floor color of each grid cell. The occupancy grid only
+says where walls are; the texture map adds what the floor looks like, and
+since it comes from a second sensor it also checks the poses by eye: a wrong
+pose paints the same floor patch in two places. Input: optimized poses,
+Kinect disparity and RGB images. Returns a $1600\times1600\times3$ color image
+on the same grid as the occupancy map. Each depth pixel becomes a 3-D
+point; floor points are moved to the world and painted with their color.}
 
 For every 5th Kinect image, with the nearest RGB image and pose in time:
 
@@ -475,10 +758,28 @@ The camera forward axis maps to $R[1,0,0]^\top=(0.936,0.020,-0.352)$, i.e.\
 $20.6^\circ$ below horizontal.
 
 \step{6} Floor filter: keep $0<z<5$\,m and $|p_{B,z}-z_{\text{floor}}|<0.05$\,m,
-with $z_{\text{floor}}=-0.14$\,m measured from the data (not 0).
+with $z_{\text{floor}}=-0.14$\,m measured from the data (not 0), and the RGB pixel inside the image.
 
 \step{7} World and paint: $\p_W=R_k\,\p_{B,xy}+\tb_k$, then
 $c\big(\operatorname{cell}(\p_W)\big)\leftarrow\text{RGB}(u_{\text{rgb}},v_{\text{rgb}})$.
+
+\begin{algorithm}[H]
+\caption{Floor texture}\label{alg:texture}
+\footnotesize
+\begin{algorithmic}[1]
+\Require poses, disparity and RGB images
+\Ensure color map $c$ ($1600\times1600\times3$)
+\State $c\gets$ black
+\For{every 5th disparity image} \Comment{all pixels at once}
+  \State RGB image and pose $T_k$ nearest in time
+  \State $dd,z\gets$ depth (step 1);\ \ $u_{\text{rgb}},v_{\text{rgb}}$ (step 2)
+  \State $\p_C\gets(z,-(u-c_u)z/f,-(v-c_v)z/f)$ \Comment{steps 3, 4}
+  \State $\p_B\gets R_z(\psi)R_y(\phi)R_x(\gamma)\p_C+[0.18,0.005,0.36]^\top$
+  \State keep floor pixels (step 6)
+  \State $c(\operatorname{cell}(R_k\p_{B,xy}+\tb_k))\gets\text{RGB}(u_{\text{rgb}},v_{\text{rgb}})$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
 
 \begin{figure*}[t]
 \centering
@@ -486,8 +787,8 @@ $c\big(\operatorname{cell}(\p_W)\big)\leftarrow\text{RGB}(u_{\text{rgb}},v_{\tex
 \caption{One Kinect image through the texture pipeline (dataset 20, image 1):
 (1) depth from disparity; (2) the same pixel in the color image; (3) kept
 floor pixels; (4) side view of one column: rays from the tilted camera hit
-the floor at $z=-0.14$\,m; (5) kept points in the world; (6) all images
-painted.}
+the floor at $z=-0.14$\,m; (5) kept points in the world; (6) every 50th
+image painted with ICP poses.}
 \label{fig:texture_math}
 \end{figure*}
 
@@ -557,13 +858,15 @@ Data & Method & Path & Gap to start & Cross-pass \\
 \end{table}
 
 
-ICP roughly halves the odometry error but still ends 2.7\,m from the start
-(Table~\ref{tab:results}, Fig.~\ref{fig:trajectory}). The pose graph closes
+ICP lowers the cross-pass error from 18.7 to 10.8\,cm (dataset 20) and
+from 17.1 to 11.4\,cm (dataset 21), but still ends 2.7 to 2.8\,m from the
+start (Table~\ref{tab:results}, Fig.~\ref{fig:trajectory}). The pose graph closes
 the loop: 0.12 and 0.22\,m, with 2.7 and 1.1\,cm cross-pass error. It
 accepted 496 fixed-interval and 121 of 875 proximity closures on dataset 20,
-and 475 and 233 of 832 on dataset 21. Many proximity candidates fail because
-the robot passes the same spot in the opposite direction, and a
-270$^\circ$ LiDAR then sees different walls.
+and 475 and 233 of 832 on dataset 21. On dataset 20, 758 of the 875
+candidates pair passes in opposite directions, and only 11\,\% of those
+pass the inlier test, against 33\,\% of same-direction pairs; facing the
+other way, the 270$^\circ$ LiDAR likely sees different walls.
 
 \begin{table}[t]
 \caption{Pose graph tuning, dataset 20.}
@@ -590,8 +893,8 @@ checked as well.
 \emph{Maps.} Figs.~\ref{fig:maps20} and~\ref{fig:maps21} show the maps over
 time and ICP vs.\ optimized poses at the end. With ICP poses the return pass
 is about 11\,cm off and the path end misses the start, which blurs the start
-area and the walls. With optimized poses both passes overlap and the
-hallways form a clean L of about 25\,m by 22\,m. Run time: scan matching
+area and the walls. With optimized poses both passes overlap, and the
+path forms an L about 23\,m by 22\,m. Run time: scan matching
 43\,s, pose graph 30\,s, occupancy map 70\,s, texture map 20\,s.
 
 
@@ -600,14 +903,18 @@ hallways form a clean L of about 25\,m by 22\,m. Run time: scan matching
 the walls but only compares nearby scans, so it still drifts; the pose
 graph links scans far apart in time, which removes the drift. Three early
 failures and their fixes: matching to the previous scan shrank the hallways
-(keyframes), loose odometry noise bent the map (small $\sigma$), and ICP from
-a bad start locked onto a wrong pose (12 initial yaws). The global rotation
-of the map depends on the first hallway and cannot be checked without
-ground truth.
+(keyframes), loose odometry noise let loop closures shrink the path (small $\sigma$), and ICP from
+a bad start locked onto a wrong pose (12 initial yaws). Cross-pass
+consistency only checks that repeated passes agree, not the overall shape:
+on dataset 20 the two hallways meet at $91^\circ$ with ICP poses and at
+$82^\circ$ with optimized poses (directions fitted to the path). If the real
+hallways are perpendicular, closing the loop bent the corner by about
+$9^\circ$; ground truth would be needed to confirm this.
 
 \section*{Acknowledgment}
 Claude (an AI assistant) was used as a tutor for hints and code checks
 during the project, and to help draft this report from the results.
+Some of the code was run on Cinaps laptops.
 
 \begin{thebibliography}{3}
 \bibitem{atanasov} N.~Atanasov, ``ECE 276A: Sensing \& Estimation in
