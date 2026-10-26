@@ -507,27 +507,13 @@ $\mathbf{u}_k$ come from the ICP poses, without loop closures the ICP path
 makes every residual zero. Only the loop closures change the path; the
 optimizer spreads their disagreement over all edges.
 
-\step{6} Robust loop edges. Let
-$\varepsilon=\sqrt{\mathbf{e}^\top\Omega\,\mathbf{e}}$ be the size of a
-residual in sigmas. In least squares an edge costs $\tfrac12\varepsilon^2$
-and pulls with force $\varepsilon$ (the slope), so a wrong loop closure
-$10\sigma$ off pulls with 10 and can bend the map. Loop edges therefore use
-the Huber cost, built from the pull: keep the least-squares pull for small
-errors, cap it at 1 for large ones, and integrate the pull to get the cost:
-\begin{equation}
-\begin{aligned}
-\psi(\varepsilon)&=\rho_H'(\varepsilon)=\min(\varepsilon,1),\\
-\varepsilon\le1:\ \rho_H(\varepsilon)&=\textstyle\int_0^{\varepsilon}s\,ds=\tfrac12\varepsilon^2,\\
-\varepsilon>1:\ \rho_H(\varepsilon)&=\textstyle\int_0^{1}s\,ds+\int_1^{\varepsilon}1\,ds=\varepsilon-\tfrac12.
-\end{aligned}
-\end{equation}
-Both pieces give $\tfrac12$ with slope 1 at $\varepsilon=1$, so the cost has
-no jump or kink. As a probability, $\exp(-\rho_H)$ has heavier tails than a
-Gaussian: a large error is rare but possible, so a bad match is treated as
-a mistake and not explained by bending the map. Gauss-Newton needs squares,
-so each iteration writes $\rho_H\approx\tfrac12w\varepsilon^2$ with
-$w=\psi(\varepsilon)/\varepsilon=\min(1,1/\varepsilon)$, i.e.\ the loop
-edge's $\Omega$ is scaled by $w$ ($w=0.1$ for an edge $10\sigma$ off).
+\step{6} Robust loop edges. A wrong loop closure would pull the map
+harder the more wrong it is, so loop edges use GTSAM's Huber cost with a
+threshold of $1\sigma$. Let $\varepsilon=\sqrt{\mathbf{e}^\top\Omega\,\mathbf{e}}$
+be an edge's error in sigmas. An edge with $\varepsilon\le1$ is weighted as
+in normal least squares; an edge further off has its $\Omega$ scaled by
+$w=1/\varepsilon$ in each iteration ($w=0.1$ for an edge $10\sigma$ off), so
+one bad match cannot bend the map.
 
 \step{7} Linearize. $\mathcal{J}$ is not quadratic in $\x$ because $R(\theta)$
 contains $\cos$ and $\sin$, so it is minimized by iterating: near the
